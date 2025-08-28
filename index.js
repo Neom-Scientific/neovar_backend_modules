@@ -1,0 +1,388 @@
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
+const cors = require('cors');
+const ftp = require('basic-ftp');
+const { Readable, Writable } = require('stream'); // Add Writable here
+const db = require('./config');
+const archiver = require('archiver');
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+app.use(cors());
+app.use(express.json());
+
+const storage = multer.memoryStorage(); // <-- use memory storage
+const upload = multer({ storage });
+
+
+async function upsertProject({ projectName, inputDir, progress, email, numberOfSamples, testName, starttime, sessionId, vcfFilePath }) {
+    // const projectid = await createProjectId(email);
+    let projectId;
+    console.log('vcfFilePath:', vcfFilePath)
+    let counterValue = 0;
+    if (typeof numberOfSamples === 'number' && Number.isFinite(numberOfSamples)) {
+        counterValue = numberOfSamples;
+    } else if (typeof numberOfSamples === 'string' && numberOfSamples.trim() !== '' && !isNaN(Number(numberOfSamples))) {
+        counterValue = Number(numberOfSamples);
+    }
+    // Ensure progress is always an integer
+    let progressValue = 0;
+    if (typeof progress === 'number' && Number.isFinite(progress)) {
+        progressValue = progress;
+    } else if (typeof progress === 'string' && progress.trim() !== '' && !isNaN(Number(progress))) {
+        progressValue = Number(progress);
+    }
+    // Try to update first
+    const updateRes = await db.query(
+        `UPDATE runningtasks
+         SET inputdir = $1, progress = $2, numberofsamples = $3, testtype = $4,vcf_file_path = $7
+         WHERE projectname = $5 AND email = $6`,
+        [inputDir, progressValue, counterValue, testName || '', projectName, email || '', vcfFilePath || []]
+    );
+    if (updateRes.rowCount === 0) {
+        projectId = await createProjectId(email);
+        console.log('projectId:', projectId)
+        await db.query(
+            'INSERT INTO runningtasks (projectid, projectname, inputdir, testtype, email, progress, numberofsamples, starttime , session_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+            [
+                projectId,
+                projectName,
+                inputDir,
+                testName,
+                email || '',
+                progressValue,
+                counterValue,
+                starttime,
+                sessionId
+            ]
+        );
+    }
+}
+async function uploadChunkViaFTPBuffer(buffer, remoteFilePath) {
+    const client = new ftp.Client();
+    client.ftp.verbose = false;
+    try {
+        await client.access({
+            host: process.env.FTP_HOST,
+            user: process.env.FTP_USER,
+            password: process.env.FTP_PASS,
+            secure: true,
+            secureOptions: { rejectUnauthorized: false },
+            passive: true,
+        });
+
+        const remoteDir = path.dirname(remoteFilePath);
+        await client.ensureDir(remoteDir);
+
+        // Convert buffer to stream for FTP upload
+        const stream = Readable.from(buffer);
+        await client.uploadFrom(stream, remoteFilePath);
+
+        // console.log(`Uploaded chunk to FTP: ${remoteFilePath}`);
+    } catch (err) {
+        console.error('FTP upload error:', err);
+        throw err;
+    } finally {
+        client.close();
+    }
+}
+
+// Upload chunk endpoint
+app.post('/upload', upload.single('chunk'), async (req, res) => {
+    const { projectName, sessionId, chunkIndex, fileName, email, relativePath = '' } = req.query;
+    const remoteFilePath = path.posix.join('/neovar', sessionId, 'inputDir', 'chunks', fileName, `chunk_${chunkIndex}`);
+    const client = new ftp.Client();
+    try {
+        await uploadChunkViaFTPBuffer(req.file.buffer, remoteFilePath);
+        // Now update metadata
+        await client.access({
+            host: process.env.FTP_HOST,
+            user: process.env.FTP_USER,
+            password: process.env.FTP_PASS,
+            secure: true,
+            secureOptions: { rejectUnauthorized: false },
+            passive: true,
+        });
+
+        await upsertProject({
+            projectName: projectName,
+            inputDir: `/neovar/${sessionId}/inputDir`,
+            progress: 0,
+            email: email,
+            testName: '',
+            starttime: Date.now(),
+            sessionId: sessionId
+
+        });
+
+        res.status(200).json({ message: 'Chunk uploaded and metadata updated' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.close();
+    }
+});
+
+
+app.post('/merge', async (req, res) => {
+    const { sessionId, fileNames, testName, numberOfSamples, email, projectName } = req.body;
+    const client = new ftp.Client();
+    try {
+        await client.access({
+            host: process.env.FTP_HOST,
+            user: process.env.FTP_USER,
+            password: process.env.FTP_PASS,
+            secure: true,
+            secureOptions: { rejectUnauthorized: false },
+            passive: true,
+        });
+
+        let vcfFilePath = [];
+        const seenBaseNames = new Set();
+        for (const fileName of fileNames) {
+            const triggerFilePath = path.posix.join('/neovar', 'triggers', `${sessionId}_${fileName}.flag`);
+            const flagContent = `${fileName}\n${testName || ''}`;
+            // Remove all extensions (.gz, .fastq, etc.)
+            let baseName = fileName.replace(/\.(fastq|fq|gz|bz2|zip)$/gi, '');
+            baseName = baseName.replace(/\.(fastq|fq|gz|bz2|zip)$/gi, '');
+            // Remove trailing _R and digit(s)
+            baseName = baseName.replace(/_R\d+$/, '_R');
+            if (!seenBaseNames.has(baseName)) {
+                vcfFilePath.push(`/neovar/${sessionId}/${sessionId}/${baseName}/${baseName}_filtered.vcf.gz`);
+                seenBaseNames.add(baseName);
+            }
+            await client.uploadFrom(Readable.from(flagContent), triggerFilePath);
+        }
+
+        // Update metadata in DB
+        await upsertProject({
+            projectName: projectName,
+            progress: 0,
+            email: email || '',
+            numberOfSamples: numberOfSamples || '',
+            testName: testName || '',
+            sessionId: sessionId,
+            vcfFilePath: vcfFilePath,
+        });
+
+        res.status(200).json({ message: 'Merge triggered and metadata updated' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.close();
+    }
+});
+
+app.get('/progress', async (req, res) => {
+    const { sessionId, email } = req.query;
+    if (!sessionId || !email) {
+        return res.status(400).json({ error: 'Missing sessionId or email' });
+    }
+    try {
+        const result = await db.query('SELECT * FROM runningtasks WHERE session_id = $1 AND email = $2', [sessionId, email]);
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'Session or email not found' });
+        }
+        const rows = result.rows;
+        const progress = rows[0].progress;
+        if (progress === 100) {
+            const {
+                projectid: projectId,
+                projectname: projectName,
+                inputdir: inputDir,
+                numberofsamples: counterValue,
+                testtype: testName,
+                email,
+                starttime,
+                session_id: sessionId,
+                vcf_file_path: vcf_file_path
+            } = rows[0];
+            await db.query('DELETE FROM runningtasks WHERE projectname = $1 AND email = $2', [projectName, email]);
+            await db.query(
+                'INSERT INTO CounterTasks (projectname,  email, numberofsamples, creationtime,session_id, vcf_file_path,projectid ) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING',
+                [
+                    projectName,
+                    email || '',
+                    counterValue,
+                    starttime,
+                    sessionId,
+                    vcf_file_path || [],
+                    projectId
+                ]
+            );
+        }
+        res.json({ rows });
+    } catch (err) {
+        console.error('Error in fetching progress from DB:', err);
+        res.status(500).json({ error: 'Error in fetching progress' });
+    }
+});
+
+app.get('/read-counter-json', async (req, res) => {
+    const email = req.query.email;
+    if (!email) {
+        return res.status(400).json({ error: 'Email parameter is required' });
+    }
+    try {
+        const counterData = await db.query('SELECT * FROM CounterTasks WHERE email = $1 ORDER BY projectid DESC', [email]);
+        if (counterData.rowCount === 0) {
+            return res.status(200).json({ error: 'No project found' });
+        }
+        return res.json(counterData.rows);
+    } catch (err) {
+        console.error('Error in fetching the counter data:', err);
+        return res.status(500).json({ error: 'Error in fetching the counter data' });
+    }
+});
+
+
+app.get('/download-vcf', async (req, res) => {
+    const { projectId, email } = req.query;
+    if (!projectId || !email) {
+        return res.status(400).json({ error: 'Missing projectId or email' });
+    }
+    try {
+        const result = await db.query(
+            'SELECT vcf_file_path FROM countertasks WHERE projectid = $1 AND email = $2',
+            [projectId, email]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        let vcfPaths = result.rows[0].vcf_file_path;
+        if (!Array.isArray(vcfPaths)) vcfPaths = [vcfPaths];
+        if (!vcfPaths || vcfPaths.length === 0) {
+            return res.status(404).json({ error: 'VCF file path not found' });
+        }
+
+        const client = new ftp.Client();
+        await client.access({
+            host: process.env.FTP_HOST,
+            user: process.env.FTP_USER,
+            password: process.env.FTP_PASS,
+            secure: true,
+            secureOptions: { rejectUnauthorized: false },
+            passive: true,
+        });
+
+        res.setHeader('Content-Disposition', `attachment; filename="vcf_files.zip"`);
+        res.setHeader('Content-Type', 'application/zip');
+
+        const archive = archiver('zip', { zlib: { level: 9 } });
+        archive.pipe(res);
+
+        for (const filePath of vcfPaths) {
+            const fileName = path.basename(filePath);
+            const passThrough = new require('stream').PassThrough();
+            archive.append(passThrough, { name: fileName });
+            await client.downloadTo(passThrough, filePath);
+        }
+
+        archive.finalize();
+        client.close();
+    } catch (err) {
+        console.error('Error downloading VCFs:', err);
+        res.status(500).json({ error: 'Error downloading VCF files' });
+    }
+});
+
+
+// app.get('/download-vcf', async (req, res) => {
+//     const { projectId, email } = req.query;
+//     if (!projectId || !email) {
+//         return res.status(400).json({ error: 'Missing projectId or email' });
+//     }
+//     let client;
+//     try {
+//         const result = await db.query(
+//             'SELECT session_id FROM countertasks WHERE projectid = $1 AND email = $2',
+//             [projectId, email]
+//         );
+//         if (result.rowCount === 0) {
+//             return res.status(404).json({ error: 'Project not found' });
+//         }
+//         const sessionId = result.rows[0].session_id;
+//         if (!sessionId) {
+//             return res.status(404).json({ error: 'Session ID not found' });
+//         }
+
+//         client = new ftp.Client(0); // No timeout
+//         client.ftp.verbose = false;
+
+//         await client.access({
+//             host: process.env.FTP_HOST,
+//             user: process.env.FTP_USER,
+//             password: process.env.FTP_PASS,
+//             secure: true,
+//             secureOptions: { rejectUnauthorized: false },
+//             passive: true,
+//         });
+
+//         const rootDir = `/neovar/${sessionId}/${sessionId}`;
+
+//         res.setHeader('Content-Disposition', `attachment; filename="${sessionId}_all_files.zip"`);
+//         res.setHeader('Content-Type', 'application/zip');
+
+//         const archive = archiver('zip', { zlib: { level: 9 } });
+//         archive.on('error', err => {
+//             console.error('Archive error:', err);
+//             res.end();
+//         });
+//         archive.pipe(res);
+
+//         async function addFtpFolderToArchive(ftpClient, remoteDir, archive, baseDir = '') {
+//             const list = await ftpClient.list(remoteDir);
+//             for (const item of list) {
+//                 const remotePath = path.posix.join(remoteDir, item.name);
+//                 const archivePath = path.posix.join(baseDir, item.name);
+//                 if (item.isDirectory) {
+//                     await addFtpFolderToArchive(ftpClient, remotePath, archive, archivePath);
+//                 } else {
+//                     const passThrough = new require('stream').PassThrough();
+//                     archive.append(passThrough, { name: archivePath });
+//                     await ftpClient.downloadTo(passThrough, remotePath);
+//                 }
+//             }
+//         }
+
+//         await addFtpFolderToArchive(client, rootDir, archive);
+
+//         archive.finalize();
+//         client.close();
+//     } catch (err) {
+//         console.error('Error downloading folder:', err);
+//         if (!res.headersSent) {
+//             res.status(500).json({ error: 'Error downloading folder' });
+//         }
+//         if (client) client.close();
+//     }
+// });
+
+async function createProjectId(email) {
+    let projectId;
+    const { rows: runningRows } = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
+    if (runningRows.length > 0) {
+        return 'already one project is running with this email';
+    }
+
+    const { rows: existingRows } = await db.query('SELECT * FROM countertasks WHERE email = $1 ORDER BY projectid DESC', [email]);
+    let counter = 1;
+
+    if (existingRows.length > 0) {
+        const lastProjectId = existingRows[0].projectid; // Get the most recent project ID
+        const lastCounter = parseInt(lastProjectId.split('-')[2], 10);
+        counter = lastCounter + 1;
+    }
+
+    projectId = `PRJ-${String(counter).padStart(2, '0')}`;
+    return projectId;
+}
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
+

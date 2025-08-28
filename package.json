@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "basic-ftp": "^5.0.5",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "node-ssh": "^13.2.1",
+    "pg": "^8.16.3"
+  }
+}
