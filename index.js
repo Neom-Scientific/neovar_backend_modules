@@ -95,7 +95,7 @@ async function uploadChunkViaFTPBuffer(buffer, remoteFilePath) {
 app.post('/upload', upload.single('chunk'), async (req, res) => {
     const { projectName, sessionId, chunkIndex, fileName, email, relativePath = '' } = req.query;
     const remoteFilePath = path.posix.join('/neovar', sessionId, 'inputDir', 'chunks', fileName, `chunk_${chunkIndex}`);
-    const client = new ftp.Client();
+    const client = new ftp.Client(6000000);
     try {
         await uploadChunkViaFTPBuffer(req.file.buffer, remoteFilePath);
         // Now update metadata
