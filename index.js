@@ -13,7 +13,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors({
-    origin: 'https://neovar-frontend.onrender.com', // or '*', but best to specify
+    origin: '*', // or '*', but best to specify
     credentials: true
   }));
 app.use(express.json());
@@ -455,7 +455,9 @@ async function createProjectId(email) {
     return projectId;
 }
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
 
+// increase timeout to 24hours
+server.timeout = 24 * 60 * 60 * 1000; // 24 hours
