@@ -12,7 +12,10 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+app.use(cors({
+    origin: 'https://neovar-frontend.onrender.com', // or '*', but best to specify
+    credentials: true
+  }));
 app.use(express.json());
 
 const storage = multer.memoryStorage(); // <-- use memory storage
