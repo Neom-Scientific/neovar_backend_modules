@@ -47,7 +47,10 @@ async function upsertProject({ projectName, inputDir, progress, email, numberOfS
         projectId = await createProjectId(email);
         console.log('projectId:', projectId)
         await db.query(
-            'INSERT INTO runningtasks (projectid, projectname, inputdir, testtype, email, progress, numberofsamples, starttime , session_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+            `INSERT INTO runningtasks 
+                (projectid, projectname, inputdir, testtype, email, progress, numberofsamples, starttime, session_id) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (projectid) DO NOTHING`,
             [
                 projectId,
                 projectName,
@@ -91,13 +94,36 @@ async function uploadChunkViaFTPBuffer(buffer, remoteFilePath) {
     }
 }
 
+app.get('/start-project', async (req, res) => {
+    const { email } = req.query;
+    try {
+        const { rows } = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
+        if (rows.length > 0) {
+            return res.json({ message: 'A project is already running with this email' ,status:400});
+        }
+        // Optionally, create the project here
+        res.json({ message: 'OK to start upload',status:200 });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // Upload chunk endpoint
 app.post('/upload', upload.single('chunk'), async (req, res) => {
     const { projectName, sessionId, chunkIndex, fileName, email, relativePath = '' } = req.query;
     const remoteFilePath = path.posix.join('/neovar', sessionId, 'inputDir', 'chunks', fileName, `chunk_${chunkIndex}`);
     const client = new ftp.Client(6000000);
     try {
+        const response = [];
         await uploadChunkViaFTPBuffer(req.file.buffer, remoteFilePath);
+        // const {rows: runningRows} = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
+        // if (runningRows.length > 0) {
+        //     response.push({
+        //         message: 'A project is already running with this email',
+        //         status: 400
+        //     })
+        //     return res.json(response);
+        // }
         // Now update metadata
         await client.access({
             host: process.env.FTP_HOST,
@@ -118,9 +144,11 @@ app.post('/upload', upload.single('chunk'), async (req, res) => {
             sessionId: sessionId
 
         });
-
-        res.status(200).json({ message: 'Chunk uploaded and metadata updated' });
+        res.json({ message: 'Chunk uploaded and metadata updated',status:200 });
     } catch (err) {
+        if (err.message.includes('A project is already running with this email')) {
+            return res.status(400).json({ message: err.message });
+        }
         res.status(500).json({ error: err.message });
     } finally {
         client.close();
@@ -132,6 +160,8 @@ app.post('/merge', async (req, res) => {
     const { sessionId, fileNames, testName, numberOfSamples, email, projectName } = req.body;
     const client = new ftp.Client();
     try {
+        const response = [];
+
         await client.access({
             host: process.env.FTP_HOST,
             user: process.env.FTP_USER,
@@ -179,13 +209,22 @@ app.post('/merge', async (req, res) => {
 
 app.get('/progress', async (req, res) => {
     const { sessionId, email } = req.query;
-    if (!sessionId || !email) {
-        return res.status(400).json({ error: 'Missing sessionId or email' });
-    }
     try {
+        const response = [];
+        if (!sessionId || !email) {
+            response.push({
+                message: 'Missing sessionId or email',
+                status: 400
+            })
+            return res.json(response);
+        }
         const result = await db.query('SELECT * FROM runningtasks WHERE session_id = $1 AND email = $2', [sessionId, email]);
         if (result.rowCount === 0) {
-            return res.status(404).json({ error: 'Session or email not found' });
+            response.push({
+                message: 'Session or email not found',
+                status: 404
+            })
+            return res.json(response);
         }
         const rows = result.rows;
         const progress = rows[0].progress;
@@ -224,13 +263,22 @@ app.get('/progress', async (req, res) => {
 
 app.get('/read-counter-json', async (req, res) => {
     const email = req.query.email;
-    if (!email) {
-        return res.status(400).json({ error: 'Email parameter is required' });
-    }
     try {
+        const response = [];
+        if (!email) {
+            response.push({
+                message: 'Email parameter is required',
+                status: 400
+            })
+            return res.json(response);
+        }
         const counterData = await db.query('SELECT * FROM CounterTasks WHERE email = $1 ORDER BY projectid DESC', [email]);
         if (counterData.rowCount === 0) {
-            return res.status(200).json({ error: 'No project found' });
+            response.push({
+                message: 'No project found for the provided email',
+                status: 404
+            })
+            return res.json(response);
         }
         return res.json(counterData.rows);
     } catch (err) {
@@ -246,17 +294,26 @@ app.get('/download-vcf', async (req, res) => {
         return res.status(400).json({ error: 'Missing projectId or email' });
     }
     try {
+        const response = [];
         const result = await db.query(
             'SELECT vcf_file_path FROM countertasks WHERE projectid = $1 AND email = $2',
             [projectId, email]
         );
         if (result.rowCount === 0) {
-            return res.status(404).json({ error: 'Project not found' });
+            response.push({
+                message: 'Project not found',
+                status: 404
+            })
+            return res.json(response);
         }
         let vcfPaths = result.rows[0].vcf_file_path;
         if (!Array.isArray(vcfPaths)) vcfPaths = [vcfPaths];
         if (!vcfPaths || vcfPaths.length === 0) {
-            return res.status(404).json({ error: 'VCF file path not found' });
+            response.push({
+                message: 'VCF file path not found',
+                status: 404
+            })
+            return res.json(response);
         }
 
         const client = new ftp.Client();
@@ -364,21 +421,34 @@ app.get('/download-vcf', async (req, res) => {
 
 async function createProjectId(email) {
     let projectId;
-    const { rows: runningRows } = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
-    if (runningRows.length > 0) {
-        return 'already one project is running with this email';
+
+    // Fetch all project IDs for the user
+    const { rows: existingRows } = await db.query('SELECT projectid FROM countertasks WHERE email = $1', [email]);
+    let maxCounter = 0;
+
+    // Regex to extract the counter from projectid (PRJ-yyyymmdd-XX)
+    const counterRegex = /^PRJ-\d{8}-(\d+)$/;
+
+    for (const row of existingRows) {
+        const match = counterRegex.exec(row.projectid);
+        if (match) {
+            const counter = parseInt(match[1], 10);
+            if (counter > maxCounter) {
+                maxCounter = counter;
+            }
+        }
     }
 
-    const { rows: existingRows } = await db.query('SELECT * FROM countertasks WHERE email = $1 ORDER BY projectid DESC', [email]);
-    let counter = 1;
+    // Get today's date in yyyymmdd format
+    const today = new Date();
+    const yyyymmdd = today.getFullYear().toString() +
+        String(today.getMonth() + 1).padStart(2, '0') +
+        String(today.getDate()).padStart(2, '0');
 
-    if (existingRows.length > 0) {
-        const lastProjectId = existingRows[0].projectid; // Get the most recent project ID
-        const lastCounter = parseInt(lastProjectId.split('-')[2], 10);
-        counter = lastCounter + 1;
-    }
+    // Increment the max counter for the new project
+    const newCounter = maxCounter + 1;
 
-    projectId = `PRJ-${String(counter).padStart(2, '0')}`;
+    projectId = `PRJ-${yyyymmdd}-${String(newCounter).padStart(2, '0')}`;
     return projectId;
 }
 
