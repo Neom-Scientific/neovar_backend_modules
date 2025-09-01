@@ -302,6 +302,7 @@ app.get('/download-vcf', async (req, res) => {
             'SELECT vcf_file_path FROM countertasks WHERE projectid = $1 AND email = $2',
             [projectId, email]
         );
+        console.log('projectId:', projectId, 'email:', email);
         if (result.rowCount === 0) {
             response.push({
                 message: 'Project not found',
@@ -318,7 +319,8 @@ app.get('/download-vcf', async (req, res) => {
             })
             return res.json(response);
         }
-
+        console.log('client connected');
+        console.log('vcfPaths:', vcfPaths);
         const client = new ftp.Client();
         await client.access({
             host: process.env.FTP_HOST,
@@ -333,6 +335,15 @@ app.get('/download-vcf', async (req, res) => {
         res.setHeader('Content-Type', 'application/zip');
 
         const archive = archiver('zip', { zlib: { level: 9 } });
+        archive.on('finish', () => {
+            client.close();
+            // Optionally log success
+        });
+        archive.on('error', err => {
+            console.error('Archive error:', err);
+            res.status(500).end();
+            client.close();
+        });
         archive.pipe(res);
 
         for (const filePath of vcfPaths) {
@@ -343,7 +354,6 @@ app.get('/download-vcf', async (req, res) => {
         }
 
         archive.finalize();
-        client.close();
     } catch (err) {
         console.error('Error downloading VCFs:', err);
         res.status(500).json({ error: 'Error downloading VCF files' });
