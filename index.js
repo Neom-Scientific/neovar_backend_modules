@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 5000;
 app.use(cors({
     origin: '*', // or '*', but best to specify
     credentials: true
-  }));
+}));
 app.use(express.json());
 
 const storage = multer.memoryStorage(); // <-- use memory storage
@@ -25,7 +25,7 @@ const upload = multer({ storage });
 async function upsertProject({ projectName, inputDir, progress, email, numberOfSamples, testName, starttime, sessionId, vcfFilePath }) {
     // const projectid = await createProjectId(email);
     let projectId;
-    console.log('vcfFilePath:', vcfFilePath)
+    // console.log('vcfFilePath:', vcfFilePath)
     let counterValue = 0;
     if (typeof numberOfSamples === 'number' && Number.isFinite(numberOfSamples)) {
         counterValue = numberOfSamples;
@@ -48,7 +48,7 @@ async function upsertProject({ projectName, inputDir, progress, email, numberOfS
     );
     if (updateRes.rowCount === 0) {
         projectId = await createProjectId(email);
-        console.log('projectId:', projectId)
+        // console.log('projectId:', projectId)
         await db.query(
             `INSERT INTO runningtasks 
                 (projectid, projectname, inputdir, testtype, email, progress, numberofsamples, starttime, session_id) 
@@ -98,14 +98,20 @@ async function uploadChunkViaFTPBuffer(buffer, remoteFilePath) {
 }
 
 app.get('/start-project', async (req, res) => {
-    const { email } = req.query;
+    const { email, numberofsamples } = req.query;
     try {
         const { rows } = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
         if (rows.length > 0) {
-            return res.json({ message: 'A project is already running with this email' ,status:400});
+            return res.json({ message: 'A project is already running with this email', status: 400 });
+        }
+        const { rows: request_form } = await db.query('SELECT * FROM request_form where email = $1', [email]);
+        let counters = request_form[0].neovar_counters;
+        counters = counters - numberofsamples;
+        if (counters < 0) {
+            return res.json({ message: 'You have insufficient counters to start a new project', status: 400 });
         }
         // Optionally, create the project here
-        res.json({ message: 'OK to start upload',status:200 });
+        res.json({ message: 'OK to start upload', status: 200 });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -113,11 +119,12 @@ app.get('/start-project', async (req, res) => {
 
 // Upload chunk endpoint
 app.post('/upload', upload.single('chunk'), async (req, res) => {
-    const { projectName, sessionId, chunkIndex, fileName, email, relativePath = '' } = req.query;
+    const { projectName, sessionId, chunkIndex, fileName, email, numberofsamples, relativePath = '' } = req.query;
     const remoteFilePath = path.posix.join('/neovar', sessionId, 'inputDir', 'chunks', fileName, `chunk_${chunkIndex}`);
     const client = new ftp.Client(6000000);
     try {
         const response = [];
+        await db.query('UPDATE request_form SET neovar_counters = $1 WHERE email = $2', [counters, email]);
         await uploadChunkViaFTPBuffer(req.file.buffer, remoteFilePath);
         // const {rows: runningRows} = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
         // if (runningRows.length > 0) {
@@ -147,9 +154,9 @@ app.post('/upload', upload.single('chunk'), async (req, res) => {
             sessionId: sessionId
 
         });
-        res.json({ message: 'Chunk uploaded and metadata updated',status:200 });
+        res.json({ message: 'Chunk uploaded and metadata updated', status: 200 });
     } catch (err) {
-        if (err.message.includes('A project is already running with this email')) {
+        if (err.message.includes('A project is already running')) {
             return res.status(400).json({ message: err.message });
         }
         res.status(500).json({ error: err.message });
@@ -302,7 +309,7 @@ app.get('/download-vcf', async (req, res) => {
             'SELECT vcf_file_path FROM countertasks WHERE projectid = $1 AND email = $2',
             [projectId, email]
         );
-        console.log('projectId:', projectId, 'email:', email);
+        // console.log('projectId:', projectId, 'email:', email);
         if (result.rowCount === 0) {
             response.push({
                 message: 'Project not found',
@@ -319,8 +326,8 @@ app.get('/download-vcf', async (req, res) => {
             })
             return res.json(response);
         }
-        console.log('client connected');
-        console.log('vcfPaths:', vcfPaths);
+        // console.log('client connected');
+        // console.log('vcfPaths:', vcfPaths);
         const client = new ftp.Client();
         await client.access({
             host: process.env.FTP_HOST,
