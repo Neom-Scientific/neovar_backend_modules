@@ -110,6 +110,9 @@ app.get('/start-project', async (req, res) => {
         if (counters < 0) {
             return res.json({ message: 'You have insufficient counters to start a new project', status: 400 });
         }
+        else {
+            await db.query('UPDATE request_form SET neovar_counters = $1 WHERE email = $2', [counters, email]);
+        }
         // Optionally, create the project here
         res.json({ message: 'OK to start upload', status: 200 });
     } catch (err) {
@@ -124,7 +127,13 @@ app.post('/upload', upload.single('chunk'), async (req, res) => {
     const client = new ftp.Client(6000000);
     try {
         const response = [];
-        await db.query('UPDATE request_form SET neovar_counters = $1 WHERE email = $2', [counters, email]);
+        // const { rows: request_form } = await db.query('SELECT neovar_counters FROM request_form WHERE email = $1', [email]);
+        // let counters = request_form[0]?.neovar_counters;
+        // // Subtract numberofsamples if needed (make sure it's a number)
+        // if (counters !== undefined && numberofsamples !== undefined) {
+        //     counters = counters - Number(numberofsamples);
+        // }
+        // await db.query('UPDATE request_form SET neovar_counters = $1 WHERE email = $2', [counters, email]);
         await uploadChunkViaFTPBuffer(req.file.buffer, remoteFilePath);
         // const {rows: runningRows} = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
         // if (runningRows.length > 0) {
