@@ -8,6 +8,7 @@ const { Readable, Writable } = require('stream'); // Add Writable here
 const db = require('./config');
 const archiver = require('archiver');
 require('dotenv').config();
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -373,6 +374,48 @@ app.get('/download-vcf', async (req, res) => {
     } catch (err) {
         console.error('Error downloading VCFs:', err);
         res.status(500).json({ error: 'Error downloading VCF files' });
+    }
+});
+
+app.post('/send-help-query', async (req, res) => {
+    const { name, email, subject, message } = req.body;
+    try {
+        const response = [];
+        if (!name || !email || !subject || !message) {
+            response.push({
+                message: 'All fields (name, email, subject, message) are required',
+                status: 400
+            })
+            return res.json(response);
+        }
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth:{
+                user:process.env.ADMIN_EMAIL,
+                pass:process.env.APP_PASSWORD,
+            }
+        });
+
+        const mailOptions = {
+            from: email,
+            to: process.env.ADMIN_EMAIL,
+            subject: `Help Query: ${subject}`,
+            html:`
+            <h3>Query came from Neovar User ${name}</h3>
+            <p>${message}</p>
+            <p>Reply to: ${email}</p>
+            `
+        };
+
+        await transporter.sendMail(mailOptions);
+        res.json({
+            message: 'Your query has been sent successfully. We will get back to you soon.',
+            status: 200
+        });
+    }
+    catch (err) {
+        console.error('Error in sending help query:', err);
+        return res.json({ message: 'Error in sending help query',status:500 });
     }
 });
 
