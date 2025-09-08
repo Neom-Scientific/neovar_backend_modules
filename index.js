@@ -9,6 +9,10 @@ const db = require('./config');
 const archiver = require('archiver');
 require('dotenv').config();
 const nodemailer = require('nodemailer');
+const axios = require('axios');
+const qs = require("querystring");
+
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -23,7 +27,7 @@ const storage = multer.memoryStorage(); // <-- use memory storage
 const upload = multer({ storage });
 
 
-async function upsertProject({ projectName, inputDir, progress, email, numberOfSamples, testName, starttime, sessionId, vcfFilePath }) {
+async function upsertProject({ projectName, inputDir, progress, email, numberOfSamples, testName, starttime, sessionId, vcfFilePath, script_path }) {
     // const projectid = await createProjectId(email);
     let projectId;
     // console.log('vcfFilePath:', vcfFilePath)
@@ -52,8 +56,8 @@ async function upsertProject({ projectName, inputDir, progress, email, numberOfS
         // console.log('projectId:', projectId)
         await db.query(
             `INSERT INTO runningtasks 
-                (projectid, projectname, inputdir, testtype, email, progress, numberofsamples, starttime, session_id) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                (projectid, projectname, inputdir, testtype, email, progress, numberofsamples, starttime, session_id,script_path) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,$10)
              ON CONFLICT (projectid) DO NOTHING`,
             [
                 projectId,
@@ -64,7 +68,8 @@ async function upsertProject({ projectName, inputDir, progress, email, numberOfS
                 progressValue,
                 counterValue,
                 starttime,
-                sessionId
+                sessionId,
+                script_path || ''
             ]
         );
     }
@@ -123,27 +128,19 @@ app.get('/start-project', async (req, res) => {
 
 // Upload chunk endpoint
 app.post('/upload', upload.single('chunk'), async (req, res) => {
-    const { projectName, sessionId, chunkIndex, fileName, email, numberofsamples, relativePath = '' } = req.query;
+    const { projectName, sessionId, chunkIndex, fileName, email, numberofsamples, processingMode, relativePath = '' } = req.query;
     const remoteFilePath = path.posix.join('/neovar', sessionId, 'inputDir', 'chunks', fileName, `chunk_${chunkIndex}`);
     const client = new ftp.Client(6000000);
     try {
         const response = [];
-        // const { rows: request_form } = await db.query('SELECT neovar_counters FROM request_form WHERE email = $1', [email]);
-        // let counters = request_form[0]?.neovar_counters;
-        // // Subtract numberofsamples if needed (make sure it's a number)
-        // if (counters !== undefined && numberofsamples !== undefined) {
-        //     counters = counters - Number(numberofsamples);
-        // }
-        // await db.query('UPDATE request_form SET neovar_counters = $1 WHERE email = $2', [counters, email]);
+        let script_path = '';
         await uploadChunkViaFTPBuffer(req.file.buffer, remoteFilePath);
-        // const {rows: runningRows} = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
-        // if (runningRows.length > 0) {
-        //     response.push({
-        //         message: 'A project is already running with this email',
-        //         status: 400
-        //     })
-        //     return res.json(response);
-        // }
+        if (processingMode === 'quantum_mode') {
+            script_path = '/opt/scrips/process_session_quantum.sh'
+        }
+        else if (processingMode === 'hyper_mode') {
+            script_path = '/home/manas/Secondary-Analysis/sentieon/neovar_script/process_session_hyper.sh'
+        }
         // Now update metadata
         await client.access({
             host: process.env.FTP_HOST,
@@ -161,8 +158,8 @@ app.post('/upload', upload.single('chunk'), async (req, res) => {
             email: email,
             testName: '',
             starttime: Date.now(),
-            sessionId: sessionId
-
+            sessionId: sessionId,
+            script_path: script_path
         });
         res.json({ message: 'Chunk uploaded and metadata updated', status: 200 });
     } catch (err) {
@@ -390,9 +387,9 @@ app.post('/send-help-query', async (req, res) => {
         }
         const transporter = nodemailer.createTransport({
             service: 'gmail',
-            auth:{
-                user:process.env.ADMIN_EMAIL,
-                pass:process.env.APP_PASSWORD,
+            auth: {
+                user: process.env.ADMIN_EMAIL,
+                pass: process.env.APP_PASSWORD,
             }
         });
 
@@ -400,7 +397,7 @@ app.post('/send-help-query', async (req, res) => {
             from: email,
             to: process.env.ADMIN_EMAIL,
             subject: `Help Query: ${subject}`,
-            html:`
+            html: `
             <h3>Query came from Neovar User ${name}</h3>
             <p>${message}</p>
             <p>Reply to: ${email}</p>
@@ -415,7 +412,7 @@ app.post('/send-help-query', async (req, res) => {
     }
     catch (err) {
         console.error('Error in sending help query:', err);
-        return res.json({ message: 'Error in sending help query',status:500 });
+        return res.json({ message: 'Error in sending help query', status: 500 });
     }
 });
 
@@ -524,9 +521,82 @@ async function createProjectId(email) {
     return projectId;
 }
 
+
+app.post('/create-syno-share', async (req, res) => {
+    const { email, project_id } = req.body;
+    try {
+        const responsesend = [];
+        const {rows}=await db.query('SELECT session_id FROM countertasks WHERE projectid=$1 AND email=$2',[project_id,email]);
+        if(rows.length===0){
+            responsesend.push({
+                message: 'No project found for the provided email and project_id',
+                status: 404
+            })
+            return res.json(responsesend);
+        }
+        const path = `/neovar/${rows[0].session_id}/${rows[0].session_id}`;
+        let sid = await axios.post('https://192.168.1.50:5001/webapi/auth.cgi?api=SYNO.API.Auth&method=login&version=6&account=neom&passwd=Syno%40ds1821&session=FileStation&format=sid',{},{httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })})
+        sid = sid.data.data.sid;
+        // console.log('sid:',sid);
+        const expire_days = 7; // Link expires in 7 days
+        const synoUrl = 'https://192.168.1.50:5001/webapi/entry.cgi';
+        const params = new URLSearchParams();
+        params.append('api', 'SYNO.FileStation.Sharing');
+        params.append('version', '3');
+        params.append('method', 'create');
+        params.append('path', path);
+        params.append('expire_days', expire_days);
+        params.append('_sid', sid);
+
+        const response = await axios.post(synoUrl, params, {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }) // Ignore self-signed certs
+        });
+        // const postData = qs.stringify({
+        //     api: "SYNO.FileStation.Sharing",
+        //     version: "3",
+        //     method: "create",
+        //     path: `/neovar/${rows[0].session_id}/${rows[0].session_id}`,
+        //     expire_days: 7,
+        //     _sid: sid
+        //   });
+        //   console.log('postData:',postData);
+          
+        //   const response = await axios.post(
+        //     "https://192.168.1.50:5001/webapi/entry.cgi",
+        //     postData,
+        //     {
+        //       headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        //       httpsAgent: new (require("https").Agent)({ rejectUnauthorized: false })
+        //     }
+        //   );
+
+        res.json(response.data);
+    } catch (err) {
+        console.error('Error creating Synology share:', err);
+        res.status(500).json({ error: 'Failed to create Synology share', details: err.message });
+    }
+});
+
 const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
 
 // increase timeout to 24hours
 server.timeout = 24 * 60 * 60 * 1000; // 24 hours
+
+// curl -k -X POST "https://192.168.1.50:5001/webapi/entry.cgi" \
+// -d "api=SYNO.FileStation.Sharing" \
+// -d "version=3" \
+// -d "method=create" \
+// -d "path=/neovar/02-09-2025--09-37-22-pkprateekkhatri@gmail.com" \
+// -d "expire_days=7" \
+// -d "_sid=gPgWoZjLcUl2rr3Uxa5l07WEz734hmBgBzowHNUpDaoRLQP4FodQUSTE812Twyi_B-i4M8EtBQmGtJ-CV-Td1M"
+{/*
+    {"data":{"has_folder":true,"links":[{"app":{"enable_upload":false,"is_folder":true},"date_available":"","date_expired":"","enable_upload":false,"expire_times":0,"has_password":false,"id":"XkhKChlUD","isFolder":true,"limit_size":0,"link_owner":"NEOM","name":"02-09-2025--09-37-22-pkprateekkhatri@gmail.com","path":"/neovar/02-09-2025--09-37-22-pkprateekkhatri@gmail.com","project_name":"SYNO.SDS.App.FileStation3.Instance","protect_groups":[],"protect_type":"none","protect_users":[],"qrcode":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHsAAAB7AQMAAABuCW08AAAABlBMVEUAAAD///+l2Z/dAAAAAnRSTlP//8i138cAAAAJcEhZcwAACxIAAAsSAdLdfvwAAAFwSURBVEiJ1dW9rcQgDABgRxR0dwsgsQYdK4UFLskCyUruWAOJBaCjQPj53un0fooXX3PSQymSTwo4BjtAvwb8ZygAS7M1moAwyaBSD2hmSEvkexkgv62KSyFCkEOkrcH1FZi9IuwvwD1S/ixe9lvofwLnI3AyfiToBHgMZ4s24WsbziAm8HREtTq4ymB42igPMBdIQQbU+sQX5tXZKoPh1NHscLQ6nkwE1Ax4E1oKSFUGFW3FvkR1YA8yGK7ftB1Au05CKDpvsYPjvcqHDCh2TvY9hTpNMqjIiQdwedfP0M9gaJidAci7T0KoLRefd2euLW9CQLh4M0V7IB0yGJr3h6dRFZ9xnEFxhucAnwAex+EciOyGfSLLIR8yKI4j5bdtAVVlwKMAFxw/SeFe2Q1mze3QCuGzf9jVccrVJgQ0S8zElc2tVw6NC4hrzgQxzC4XzWvaTQjUF+Rzp7gsSAacjxvk2vqsHx33HN7z43sHfAAnmGD+1H8f/wAAAABJRU5ErkJggg==","request_info":"","request_name":"","status":"valid","uid":1026,"url":"https://gofile
+    */}
+// strive@strive:/media/strive/Strive/prateek/neovar_modules$ curl -k -X POST "https://192.168.1.50:5001/webapi/entry.cgi" -d "api=SYNO.FileStation.Sharing" -d "version=3" -d "method=create" -d "path=/neovar/02-09-2025--09-37-22-pkprateekkhatri@gmail.com" -d "expire_days=7" -d "_sid=gPgWoZjLcUl2rr3Uxa5l07WEz734hmBgBzowHNUpDaoRLQP4FodQUSTE812Twyi_B-i4M8EtBQmGtJ-CV-Td1M"
+{/*
+    {"data":{"has_folder":true,"links":[{"app":{"enable_upload":false,"is_folder":true},"date_available":"","date_expired":"","enable_upload":false,"expire_times":0,"has_password":false,"id":"jS9cwUGKj","isFolder":true,"limit_size":0,"link_owner":"NEOM","name":"02-09-2025--09-37-22-pkprateekkhatri@gmail.com","path":"/neovar/02-09-2025--09-37-22-pkprateekkhatri@gmail.com","project_name":"SYNO.SDS.App.FileStation3.Instance","protect_groups":[],"protect_type":"none","protect_users":[],"qrcode":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHsAAAB7AQMAAABuCW08AAAABlBMVEUAAAD///+l2Z/dAAAAAnRSTlP//8i138cAAAAJcEhZcwAACxIAAAsSAdLdfvwAAAFzSURBVEiJ1dU9bsMgFAfwZ3lgiy+AxDW8cSX7Aia+QHwlNq6BxAXMxoD8+qeNmqhD/CJ1aJGH+CcFwfsy8Y9F/xl2IhdoIV49dTLIXF0w2dMQ8FsGXi8qdl4PgeY3AHvU7h2YQ1o5ZTm0k2oXAE9HfwmIxxx0ex4BOgGsXNKhqnuk4Qx8JYubpZsyQthHXkvaCl9VykKwOCO2SRvXTgZcEnuzIerFZBkcFCdlDtVf2zYiyL5fAx82cYlOBvtYO1+H0u9jYimYm9JTK/A4yOCwkdoxe3TDLARCivTFxgEVIYMc4qL6DW1ntZMBor6PcSgVnbrJYFcaKdoRQr7f9hwIhYOeQ/juFXQKzHVR2vm03i93DodFepGoSmPPMsDbzAYhn8hsMmg9x3qy6FHDMmidXdJn6ZGTQZsf+K/nlR/j8wTaYNNEePpNDBg2LqDnsI0UJswbj85LLIQ2C3sMqqt9Go4v4evrgXUZvwN0Ar/xWfsb8AGcqHfzcPo7zQAAAABJRU5ErkJggg==","request_info":"","request_name":"","status":"valid","uid":1026,"url":"https://gofile.me/7G23n/jS9cwUGKj"}]},"success":true}
+    
+    */}
