@@ -27,7 +27,7 @@ const storage = multer.memoryStorage(); // <-- use memory storage
 const upload = multer({ storage });
 
 
-async function upsertProject({ projectName, inputDir, progress, email, numberOfSamples, testName, starttime, sessionId, vcfFilePath, script_path }) {
+async function upsertProject({ projectName, inputDir, progress, email, numberOfSamples, testName, starttime, sessionId, vcfFilePath, script_path ,application_type}) {
     // const projectid = await createProjectId(email);
     let projectId;
     // console.log('vcfFilePath:', vcfFilePath)
@@ -48,16 +48,16 @@ async function upsertProject({ projectName, inputDir, progress, email, numberOfS
     const updateRes = await db.query(
         `UPDATE runningtasks
          SET inputdir = $1, progress = $2, numberofsamples = $3, testtype = $4,vcf_file_path = $7
-         WHERE projectname = $5 AND email = $6`,
-        [inputDir, progressValue, counterValue, testName || '', projectName, email || '', vcfFilePath || []]
+         WHERE projectname = $5 AND email = $6 AND application_type=$8`,
+        [inputDir, progressValue, counterValue, testName || '', projectName, email || '', vcfFilePath || [],application_type || '']
     );
     if (updateRes.rowCount === 0) {
         projectId = await createProjectId(email);
         // console.log('projectId:', projectId)
         await db.query(
             `INSERT INTO runningtasks 
-                (projectid, projectname, inputdir, testtype, email, progress, numberofsamples, starttime, session_id,script_path) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,$10)
+                (projectid, projectname, inputdir, testtype, email, progress, numberofsamples, starttime, session_id,script_path,application_type) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,$10,$11)
              ON CONFLICT (projectid) DO NOTHING`,
             [
                 projectId,
@@ -69,7 +69,8 @@ async function upsertProject({ projectName, inputDir, progress, email, numberOfS
                 counterValue,
                 starttime,
                 sessionId,
-                script_path || ''
+                script_path || '',
+                application_type || ''
             ]
         );
     }
@@ -104,9 +105,9 @@ async function uploadChunkViaFTPBuffer(buffer, remoteFilePath) {
 }
 
 app.get('/start-project', async (req, res) => {
-    const { email, numberofsamples } = req.query;
+    const { email, numberofsamples,application_type } = req.query;
     try {
-        const { rows } = await db.query('SELECT * FROM runningtasks WHERE email = $1', [email]);
+        const { rows } = await db.query('SELECT * FROM runningtasks WHERE email = $1 and application_type = $2', [email,application_type]);
         if (rows.length > 0) {
             return res.json({ message: 'A project is already running with this email', status: 400 });
         }
@@ -128,7 +129,7 @@ app.get('/start-project', async (req, res) => {
 
 // Upload chunk endpoint
 app.post('/upload', upload.single('chunk'), async (req, res) => {
-    const { projectName, sessionId, chunkIndex, fileName, email, numberofsamples, processingMode, relativePath = '' } = req.query;
+    const { projectName, sessionId, chunkIndex, fileName, email, numberofsamples, processingMode, application_type,relativePath = '' } = req.query;
     const remoteFilePath = path.posix.join('/neovar', sessionId, 'inputDir', 'chunks', fileName, `chunk_${chunkIndex}`);
     const client = new ftp.Client(6000000);
     try {
@@ -159,7 +160,8 @@ app.post('/upload', upload.single('chunk'), async (req, res) => {
             testName: '',
             starttime: Date.now(),
             sessionId: sessionId,
-            script_path: script_path
+            script_path: script_path,
+            application_type: application_type
         });
         res.json({ message: 'Chunk uploaded and metadata updated', status: 200 });
     } catch (err) {
@@ -235,7 +237,7 @@ app.get('/progress', async (req, res) => {
             })
             return res.json(response);
         }
-        const result = await db.query('SELECT * FROM runningtasks WHERE session_id = $1 AND email = $2', [sessionId, email]);
+        const result = await db.query('SELECT * FROM runningtasks WHERE session_id = $1 AND email = $2 AND application_type = $3', [sessionId, email,"neovar"]);
         if (result.rowCount === 0) {
             response.push({
                 message: 'Session or email not found',
@@ -289,7 +291,7 @@ app.get('/read-counter-json', async (req, res) => {
             })
             return res.json(response);
         }
-        const counterData = await db.query('SELECT * FROM CounterTasks WHERE email = $1 ORDER BY projectid DESC', [email]);
+        const counterData = await db.query("SELECT * FROM CounterTasks WHERE email = $1 AND application_type = $2 ORDER BY projectid DESC", [email,'neovar']);
         if (counterData.rowCount === 0) {
             response.push({
                 message: 'No project found for the provided email',
