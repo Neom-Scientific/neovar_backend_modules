@@ -366,7 +366,17 @@ app.get('/download-vcf', async (req, res) => {
             const fileName = path.basename(filePath);
             const passThrough = new require('stream').PassThrough();
             archive.append(passThrough, { name: fileName });
-            await client.downloadTo(passThrough, filePath);
+            try {
+                await client.downloadTo(passThrough, filePath);
+            } catch (ftpErr) {
+                console.error('FTP download error:', ftpErr);
+                archive.abort(); // Stop the archive
+                client.close();
+                if (!res.headersSent) {
+                    return res.status(404).json({ error: `File not found: ${filePath}` });
+                }
+                return; // Exit the handler
+            }
         }
 
         archive.finalize();
