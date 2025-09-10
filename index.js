@@ -27,7 +27,7 @@ const storage = multer.memoryStorage(); // <-- use memory storage
 const upload = multer({ storage });
 
 
-async function upsertProject({ projectName, inputDir, progress, email, numberOfSamples, testName, starttime, sessionId, vcfFilePath, script_path ,application_type}) {
+async function upsertProject({ projectName, inputDir, progress, email, numberOfSamples, testName, starttime, sessionId, vcfFilePath, script_path, application_type }) {
     // const projectid = await createProjectId(email);
     let projectId;
     // console.log('vcfFilePath:', vcfFilePath)
@@ -49,7 +49,7 @@ async function upsertProject({ projectName, inputDir, progress, email, numberOfS
         `UPDATE runningtasks
          SET inputdir = $1, progress = $2, numberofsamples = $3, testtype = $4,vcf_file_path = $7
          WHERE projectname = $5 AND email = $6 AND application_type=$8`,
-        [inputDir, progressValue, counterValue, testName || '', projectName, email || '', vcfFilePath || [],application_type || '']
+        [inputDir, progressValue, counterValue, testName || '', projectName, email || '', vcfFilePath || [], application_type || '']
     );
     if (updateRes.rowCount === 0) {
         projectId = await createProjectId(email);
@@ -105,9 +105,9 @@ async function uploadChunkViaFTPBuffer(buffer, remoteFilePath) {
 }
 
 app.get('/start-project', async (req, res) => {
-    const { email, numberofsamples,application_type } = req.query;
+    const { email, numberofsamples, application_type } = req.query;
     try {
-        const { rows } = await db.query('SELECT * FROM runningtasks WHERE email = $1 and application_type = $2', [email,application_type]);
+        const { rows } = await db.query('SELECT * FROM runningtasks WHERE email = $1 and application_type = $2', [email, application_type]);
         if (rows.length > 0) {
             return res.json({ message: 'A project is already running with this email', status: 400 });
         }
@@ -129,7 +129,7 @@ app.get('/start-project', async (req, res) => {
 
 // Upload chunk endpoint
 app.post('/upload', upload.single('chunk'), async (req, res) => {
-    const { projectName, sessionId, chunkIndex, fileName, email, numberofsamples, processingMode, application_type,relativePath = '' } = req.query;
+    const { projectName, sessionId, chunkIndex, fileName, email, numberofsamples, processingMode, application_type, relativePath = '' } = req.query;
     const remoteFilePath = path.posix.join('/neovar', sessionId, 'inputDir', 'chunks', fileName, `chunk_${chunkIndex}`);
     const client = new ftp.Client(6000000);
     try {
@@ -237,7 +237,7 @@ app.get('/progress', async (req, res) => {
             })
             return res.json(response);
         }
-        const result = await db.query('SELECT * FROM runningtasks WHERE session_id = $1 AND email = $2 AND application_type = $3', [sessionId, email,"neovar"]);
+        const result = await db.query('SELECT * FROM runningtasks WHERE session_id = $1 AND email = $2 AND application_type = $3', [sessionId, email, "neovar"]);
         if (result.rowCount === 0) {
             response.push({
                 message: 'Session or email not found',
@@ -291,7 +291,7 @@ app.get('/read-counter-json', async (req, res) => {
             })
             return res.json(response);
         }
-        const counterData = await db.query("SELECT * FROM CounterTasks WHERE email = $1 AND application_type = $2 ORDER BY projectid DESC", [email,'neovar']);
+        const counterData = await db.query("SELECT * FROM CounterTasks WHERE email = $1 AND application_type = $2 ORDER BY projectid DESC", [email, 'neovar']);
         if (counterData.rowCount === 0) {
             response.push({
                 message: 'No project found for the provided email',
@@ -538,8 +538,8 @@ app.post('/create-syno-share', async (req, res) => {
     const { email, project_id } = req.body;
     try {
         const responsesend = [];
-        const {rows}=await db.query('SELECT session_id FROM countertasks WHERE projectid=$1 AND email=$2',[project_id,email]);
-        if(rows.length===0){
+        const { rows } = await db.query('SELECT session_id FROM countertasks WHERE projectid=$1 AND email=$2', [project_id, email]);
+        if (rows.length === 0) {
             responsesend.push({
                 message: 'No project found for the provided email and project_id',
                 status: 404
@@ -547,7 +547,7 @@ app.post('/create-syno-share', async (req, res) => {
             return res.json(responsesend);
         }
         const path = `/neovar/${rows[0].session_id}/${rows[0].session_id}`;
-        let sid = await axios.post('https://192.168.1.50:5001/webapi/auth.cgi?api=SYNO.API.Auth&method=login&version=6&account=neom&passwd=Syno%40ds1821&session=FileStation&format=sid',{},{httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })})
+        let sid = await axios.post('https://192.168.1.50:5001/webapi/auth.cgi?api=SYNO.API.Auth&method=login&version=6&account=neom&passwd=Syno%40ds1821&session=FileStation&format=sid', {}, { httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }) })
         sid = sid.data.data.sid;
         // console.log('sid:',sid);
         const expire_days = 7; // Link expires in 7 days
@@ -573,7 +573,7 @@ app.post('/create-syno-share', async (req, res) => {
         //     _sid: sid
         //   });
         //   console.log('postData:',postData);
-          
+
         //   const response = await axios.post(
         //     "https://192.168.1.50:5001/webapi/entry.cgi",
         //     postData,
@@ -587,6 +587,135 @@ app.post('/create-syno-share', async (req, res) => {
     } catch (err) {
         console.error('Error creating Synology share:', err);
         res.status(500).json({ error: 'Failed to create Synology share', details: err.message });
+    }
+});
+
+// app.get('/get-output-dir', async (req, res) => {
+//     const { email } = req.query;
+//     try {
+//         const response = [];
+//         const { rows } = await db.query('SELECT session_id FROM countertasks WHERE email=$1 AND application_type = $2 ORDER BY projectid DESC', [email, "neovar"]);
+//         if (rows.length === 0) {
+//             response.push({
+//                 message: 'No project found for the provided email',
+//                 status: 404
+//             });
+//             return res.json(response);
+//         }
+//         const client = new ftp.Client();
+//         await client.access({
+//             host: process.env.FTP_HOST,
+//             user: process.env.FTP_USER,
+//             password: process.env.FTP_PASS,
+//             secure: true,
+//             secureOptions: { rejectUnauthorized: false },
+//             passive: true,
+//         });
+
+//         const outputDirs = [];
+//         for (const row of rows) {
+//             const outputDir = `/neovar/${row.session_id}/${row.session_id}`;
+//             // List folders inside outputDir
+//             const list = await client.list(outputDir);
+//             const folders = list.filter(item => item.isDirectory).map(item => item.name);
+//             outputDirs.push({ outputDir, folders });
+//         }
+//         client.close();
+//         return res.json({ outputDirs });
+//     }
+//     catch (err) {
+//         console.error('Error in get-output-dir:', err);
+//         res.status(500).json({ error: 'Failed to get output dir', details: err.message });
+//     }
+// });
+
+app.get('/get-output-dir', async (req, res) => {
+    const { email } = req.query;
+    try {
+        const response = [];
+        const { rows } = await db.query(
+            'SELECT session_id FROM countertasks WHERE email=$1 AND application_type = $2 ORDER BY projectid DESC',
+            [email, "neovar"]
+        );
+        if (rows.length === 0) {
+            response.push({
+                message: 'No project found for the provided email',
+                status: 404
+            });
+            return res.json(response);
+        }
+        const client = new ftp.Client();
+        await client.access({
+            host: process.env.FTP_HOST,
+            user: process.env.FTP_USER,
+            password: process.env.FTP_PASS,
+            secure: true,
+            secureOptions: { rejectUnauthorized: false },
+            passive: true,
+        });
+
+        const outputDirs = [];
+        for (const row of rows) {
+            const outputDir = `/neovar/${row.session_id}/${row.session_id}`;
+            const folderList = await client.list(outputDir);
+            const folders = folderList.filter(item => item.isDirectory).map(item => item.name);
+
+            const foldersWithFiles = [];
+            for (const folderName of folders) {
+                const folderPath = path.posix.join(outputDir, folderName);
+                const fileList = await client.list(folderPath);
+                const files = fileList.filter(item => !item.isDirectory).map(item => item.name);
+                foldersWithFiles.push({
+                    folder: folderName,
+                    files: files
+                });
+            }
+
+            outputDirs.push({
+                outputDir,
+                folders: foldersWithFiles
+            });
+        }
+        client.close();
+        return res.json({ outputDirs });
+    }
+    catch (err) {
+        console.error('Error in get-output-dir:', err);
+        res.status(500).json({ error: 'Failed to get output dir', details: err.message });
+    }
+});
+
+app.get('/download-file', async (req, res) => {
+    const { filePath } = req.query;
+    if (!filePath) {
+        return res.status(400).json({ error: 'Missing filePath parameter' });
+    }
+    // const client = new ftp.Client();
+    const client = new ftp.Client(24 * 60 * 60 * 1000); // 24 hours
+    try {
+        await client.access({
+            host: process.env.FTP_HOST,
+            user: process.env.FTP_USER,
+            password: process.env.FTP_PASS,
+            secure: true,
+            secureOptions: { rejectUnauthorized: false },
+            passive: true,
+        });
+
+        const fileName = require('path').basename(filePath);
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+        res.setHeader('Content-Type', 'application/octet-stream');
+
+        const passThrough = new require('stream').PassThrough();
+        passThrough.pipe(res);
+        await client.downloadTo(passThrough, filePath);
+    } catch (err) {
+        console.error('Error downloading file:', err);
+        if (!res.headersSent) {
+            res.status(404).json({ error: 'File not found or download failed' });
+        }
+    } finally {
+        client.close();
     }
 });
 
